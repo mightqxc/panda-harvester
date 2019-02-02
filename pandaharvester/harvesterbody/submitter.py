@@ -1,6 +1,7 @@
 import math
 import datetime
 import time
+import socket
 from future.utils import iteritems
 
 from pandaharvester.harvesterconfig import harvester_config
@@ -14,6 +15,7 @@ from pandaharvester.harvesterbody.worker_maker import WorkerMaker
 from pandaharvester.harvesterbody.worker_adjuster import WorkerAdjuster
 from pandaharvester.harvestercore.pilot_errors import PilotErrors
 from pandaharvester.harvestercore.fifos import MonitorFIFO
+from pandaharvester.harvestermisc.apfmon import Apfmon
 
 # logger
 _logger = core_utils.setup_logger('submitter')
@@ -30,6 +32,7 @@ class Submitter(AgentBase):
         self.workerAdjuster = WorkerAdjuster(queue_config_mapper)
         self.pluginFactory = PluginFactory()
         self.monitor_fifo = MonitorFIFO()
+        self.apfmon = Apfmon(self.queueConfigMapper)
 
     # main loop
     def run(self):
@@ -163,6 +166,8 @@ class Submitter(AgentBase):
                                                                                               maker=workerMakerCore)
                                     maxWorkersPerJob = self.workerMaker.get_max_workers_per_job_in_total(
                                         queueConfig, resource_type, maker=workerMakerCore)
+                                    maxWorkersPerJobPerCycle = self.workerMaker.get_max_workers_per_job_per_cycle(
+                                        queueConfig, resource_type, maker=workerMakerCore)
                                     tmpLog.debug('nWorkersPerJob={0}'.format(nWorkersPerJob))
                                     jobChunks = self.dbProxy.get_job_chunks_for_workers(
                                         queueName,
@@ -170,7 +175,8 @@ class Submitter(AgentBase):
                                         queueConfig.useJobLateBinding,
                                         harvester_config.submitter.checkInterval,
                                         harvester_config.submitter.lockInterval,
-                                        lockedBy, max_workers_per_job_in_total=maxWorkersPerJob)
+                                        lockedBy, max_workers_per_job_in_total=maxWorkersPerJob,
+                                        max_workers_per_job_per_cycle=maxWorkersPerJobPerCycle)
                                 else:
                                     tmpLog.error('unknown mapType={0}'.format(queueConfig.mapType))
                                     continue
@@ -273,8 +279,20 @@ class Submitter(AgentBase):
                                     tmpLog.info('submitting {0} workers'.format(len(workSpecList)))
                                     workSpecList, tmpRetList, tmpStrList = self.submit_workers(submitterCore,
                                                                                                workSpecList)
+                                    # collect successful jobs
+                                    okPandaIDs = set()
+                                    for iWorker, (tmpRet, tmpStr) in enumerate(zip(tmpRetList, tmpStrList)):
+                                        if tmpRet:
+                                            workSpec, jobList = okChunks[iWorker]
+                                            jobList = workSpec.get_jobspec_list()
+                                            if jobList is not None:
+                                                for jobSpec in jobList:
+                                                    okPandaIDs.add(jobSpec.PandaID)
+                                    # loop over all workers
                                     for iWorker, (tmpRet, tmpStr) in enumerate(zip(tmpRetList, tmpStrList)):
                                         workSpec, jobList = okChunks[iWorker]
+                                        # set harvesterHost
+                                        workSpec.harvesterHost = socket.gethostname()
                                         # use associated job list since it can be truncated for re-filling
                                         jobList = workSpec.get_jobspec_list()
                                         # set status
@@ -291,6 +309,9 @@ class Submitter(AgentBase):
                                                 # increment attempt number
                                                 newJobList = []
                                                 for jobSpec in jobList:
+                                                    # skip if successful with another worker
+                                                    if jobSpec.PandaID in okPandaIDs:
+                                                        continue
                                                     if jobSpec.submissionAttempts is None:
                                                         jobSpec.submissionAttempts = 0
                                                     jobSpec.submissionAttempts += 1
@@ -356,7 +377,8 @@ class Submitter(AgentBase):
                                         workSpecsToEnqueue = \
                                             [[w] for w in workSpecList if w.status
                                              in (WorkSpec.ST_submitted, WorkSpec.ST_running)]
-                                        monitor_fifo.put((queueName, workSpecsToEnqueue))
+                                        monitor_fifo.put((queueName, workSpecsToEnqueue),
+                                                            time.time() + harvester_config.monitor.fifoCheckInterval)
                                         mainLog.debug('put workers to monitor FIFO')
                                     submitted = True
                                 # release jobs
@@ -394,6 +416,10 @@ class Submitter(AgentBase):
             else:
                 workersToSubmit.append(workSpec)
         tmpRetList = submitter_core.submit_workers(workersToSubmit)
+
+        # submit the workers to the monitoring
+        self.apfmon.create_workers(workersToSubmit)
+
         for tmpRet, tmpStr in tmpRetList:
             retList.append(tmpRet)
             strList.append(tmpStr)

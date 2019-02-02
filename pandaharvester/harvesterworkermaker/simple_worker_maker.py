@@ -1,3 +1,5 @@
+import random
+
 from pandaharvester.harvestercore.work_spec import WorkSpec
 from pandaharvester.harvestercore import core_utils
 from pandaharvester.harvestermisc.info_utils import PandaQueuesDict
@@ -14,16 +16,38 @@ class SimpleWorkerMaker(BaseWorkerMaker):
     # constructor
     def __init__(self, **kwarg):
         BaseWorkerMaker.__init__(self, **kwarg)
-        self.jobAttributesToUse = ['nCore', 'minRamCount', 'maxDiskCount', 'maxWalltime']
+        self.jobAttributesToUse = ['nCore', 'minRamCount', 'maxDiskCount', 'maxWalltime', 'ioIntensity']
         self.rt_mapper = ResourceTypeMapper()
+        try:
+            self.pilotTypeRandomWeightsPermille
+        except AttributeError:
+            self.pilotTypeRandomWeightsPermille = {
+                'RC': 2,
+                'ALRB': 10,
+                'PT': 1,
+            }
+        finally:
+            # randomize pilot type with weighting
+            weight_rc = self.pilotTypeRandomWeightsPermille.get('RC', 0)
+            weight_alrb = self.pilotTypeRandomWeightsPermille.get('ALRB', 0)
+            weight_pt = self.pilotTypeRandomWeightsPermille.get('PT', 0)
+            weight_tmp_sum = weight_rc + weight_alrb + weight_pt
+            if weight_tmp_sum > 1000:
+                weight_rc = weight_rc*1000/weight_tmp_sum
+                weight_alrb = weight_alrb*1000/weight_tmp_sum
+                weight_pt = weight_pt*1000/weight_tmp_sum
+            weight_pr = 1000 - (weight_rc + weight_alrb + weight_pt)
+            self.pilotTypeRandomList = ['PR'] * weight_pr \
+                + ['RC'] * weight_rc \
+                + ['ALRB'] * weight_alrb \
+                + ['PT'] * weight_pt
 
     def get_job_core_and_memory(self, queue_dict, job_spec):
 
         job_memory = job_spec.jobParams.get('minRamCount', 0) or 0
         job_corecount = job_spec.jobParams.get('coreCount', 1) or 1
 
-        unified_queue = 'unifiedPandaQueue' in queue_dict.get('catchall', '') \
-                        or queue_dict.get('capability', '') == 'ucore'
+        unified_queue = queue_dict.get('capability', '') == 'ucore'
 
         if not job_memory and unified_queue:
             site_maxrss = queue_dict.get('maxrss', 0) or 0
@@ -50,8 +74,7 @@ class SimpleWorkerMaker(BaseWorkerMaker):
         panda_queues_dict = PandaQueuesDict()
         queue_dict = panda_queues_dict.get(queue_config.queueName, {})
 
-        unified_queue = 'unifiedPandaQueue' in queue_dict.get('catchall', '')\
-                        or queue_dict.get('capability', '') == 'ucore'
+        unified_queue = queue_dict.get('capability', '') == 'ucore'
         # case of traditional (non-unified) queue: look at the queue configuration
         if not unified_queue:
             workSpec.nCore = queue_dict.get('corecount', 1) or 1
@@ -59,8 +82,9 @@ class SimpleWorkerMaker(BaseWorkerMaker):
 
         # case of unified queue: look at the resource type and queue configuration
         else:
-
-            if queue_config.queueName in ('Taiwan-LCG2-HPC2_Unified', 'Taiwan-LCG2-HPC_Unified'):
+            catchall = queue_dict.get('catchall', '')
+            if 'useMaxRamUcore' in catchall or queue_config.queueName in ('Taiwan-LCG2-HPC2_Unified',
+                                                                       'Taiwan-LCG2-HPC_Unified', 'DESY-ZN_UCORE'):
                 # temporary hack to debug killed workers in Taiwan queues
                 site_corecount = queue_dict.get('corecount', 1) or 1
                 site_maxrss = queue_dict.get('maxrss', 1) or 1
@@ -82,26 +106,28 @@ class SimpleWorkerMaker(BaseWorkerMaker):
         workSpec.maxWalltime = queue_dict.get('maxtime', 1)
         workSpec.maxDiskCount = queue_dict.get('maxwdir', 1)
 
-        # get info from jobs
         if len(jobspec_list) > 0:
+            # get info from jobs
             nCore = 0
             minRamCount = 0
             maxDiskCount = 0
             maxWalltime = 0
+            ioIntensity = 0
             for jobSpec in jobspec_list:
-
                 job_corecount, job_memory = self.get_job_core_and_memory(queue_dict, jobSpec)
                 nCore += job_corecount
                 minRamCount += job_memory
-
                 try:
                     maxDiskCount += jobSpec.jobParams['maxDiskCount']
                 except Exception:
                     pass
-
+                try:
+                    ioIntensity += jobSpec.jobParams['ioIntensity']
+                except Exception:
+                    pass
                 try:
                     if jobSpec.jobParams['maxWalltime'] not in (None, "NULL"):
-                        if hasattr(queue_config, 'maxWalltime'):
+                        if hasattr(queue_config, 'walltimeLimit'):
                             maxWalltime = max(int(queue_config.walltimeLimit), jobSpec.jobParams['maxWalltime'])
                         else:
                             maxWalltime = jobSpec.jobParams['maxWalltime']
@@ -119,7 +145,16 @@ class SimpleWorkerMaker(BaseWorkerMaker):
                 workSpec.maxDiskCount = maxDiskCount
             if maxWalltime > 0 and 'maxWalltime' in self.jobAttributesToUse:
                 workSpec.maxWalltime = maxWalltime
-
+            if ioIntensity > 0 and 'ioIntensity' in self.jobAttributesToUse:
+                workSpec.ioIntensity = ioIntensity
+            workSpec.pilotType = jobspec_list[0].get_pilot_type()
+        else:
+            # when no job
+            # randomize pilot type with weighting
+            workSpec.pilotType = random.choice(self.pilotTypeRandomList)
+            if workSpec.pilotType in ['RC', 'ALRB', 'PT']:
+                tmpLog.info('a worker of {0} has pilotType={1}'.format(
+                    workSpec.computingSite, workSpec.pilotType))
         # TODO: this needs to be improved with real resource types
         if resource_type and resource_type != 'ANY':
             workSpec.resourceType = resource_type

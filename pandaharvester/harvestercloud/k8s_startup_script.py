@@ -10,14 +10,13 @@ This script will be executed at the VM startup time.
 import requests
 try:
     import subprocess32 as subprocess
-except:
+except Exception:
     import subprocess
 import os
 import sys
 import logging
 import time
 import traceback
-import zlib
 from threading import Thread
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s',
@@ -29,7 +28,6 @@ loop = True
 
 def upload_logs(url, log_file_name, destination_name, proxy_path):
     try:
-
         # open and compress the content of the file
         with open(log_file_name, 'rb') as log_file_object:
             files = {'file': (destination_name, log_file_object.read())}
@@ -42,7 +40,7 @@ def upload_logs(url, log_file_name, destination_name, proxy_path):
         logging.debug('[upload_logs] finished with code={0} msg={1}'.format(res.status_code, res.text))
         if res.status_code == 200:
             return True
-    except:
+    except Exception:
         err_type, err_value = sys.exc_info()[:2]
         err_messsage = "failed to put with {0}:{1} ".format(err_type, err_value)
         err_messsage += traceback.format_exc()
@@ -104,26 +102,35 @@ def get_configuration():
     proxy_string = os.environ.get('proxyContent').replace(",", "\n")
     with open(proxy_path, "w") as proxy_file:
         proxy_file.write(proxy_string)
+    os.chmod(proxy_path, 0o600)
     os.environ['X509_USER_PROXY'] = proxy_path
     logging.debug('[main] initialized proxy')
 
+    # get the panda site name
+    panda_site = os.environ.get('computingSite')
+    logging.debug('[main] got panda site: {0}'.format(panda_site))
+
     # get the panda queue name
-    panda_queue = os.environ.get('computingSite')
+    panda_queue = os.environ.get('pandaQueueName')
     logging.debug('[main] got panda queue: {0}'.format(panda_queue))
 
+    # get the resource type of the worker
+    resource_type = os.environ.get('resourceType')
+    logging.debug('[main] got resource type: {0}'.format(resource_type))
+
     # get the harvester frontend URL, where we'll send heartbeats
-#    harvester_frontend_url = METADATA_URL.format("harvester_frontend")
+    # harvester_frontend_url = METADATA_URL.format("harvester_frontend")
     harvester_frontend = None
-#    logging.debug('[main] got harvester frontend: {0}'.format(harvester_frontend))
+    # logging.debug('[main] got harvester frontend: {0}'.format(harvester_frontend))
 
     # get the worker id
     worker_id = os.environ.get('workerID')
     logging.debug('[main] got worker id: {0}'.format(worker_id))
 
     # get the authentication token
-#    auth_token_url = METADATA_URL.format("auth_token")
+    # auth_token_url = METADATA_URL.format("auth_token")
     auth_token = None
-#    logging.debug('[main] got authentication token')
+    # logging.debug('[main] got authentication token')
 
     # get the URL (e.g. panda cache) to upload logs
     logs_frontend_w = os.environ.get('logs_frontend_w')
@@ -133,17 +140,17 @@ def get_configuration():
     logs_frontend_r = os.environ.get('logs_frontend_r')
     logging.debug('[main] got url to download logs')
 
-    return proxy_path, panda_queue, harvester_frontend, worker_id, auth_token, logs_frontend_w, logs_frontend_r
+    return proxy_path, panda_site, panda_queue, resource_type, harvester_frontend, worker_id, auth_token, logs_frontend_w, logs_frontend_r
 
 
 if __name__ == "__main__":
 
     # get all the configuration from the GCE metadata server
-    proxy_path, panda_queue, harvester_frontend, worker_id, auth_token, logs_frontend_w, logs_frontend_r = get_configuration()
+    proxy_path, panda_site, panda_queue, resource_type, harvester_frontend, worker_id, auth_token, logs_frontend_w, logs_frontend_r = get_configuration()
 
     # start a separate thread that will send a heartbeat to harvester every 5 minutes
-#    heartbeat_thread = Thread(target=heartbeat_loop, args=(harvester_frontend, worker_id, auth_token, proxy_path))
-#    heartbeat_thread.start()
+    # heartbeat_thread = Thread(target=heartbeat_loop, args=(harvester_frontend, worker_id, auth_token, proxy_path))
+    # heartbeat_thread.start()
 
     # the pilot should propagate the download link via the pilotId field in the job table
     destination_name = '{0}.log'.format(worker_id)
@@ -152,18 +159,20 @@ if __name__ == "__main__":
 
     # get the pilot wrapper
     wrapper_path = "/tmp/runpilot3-wrapper.sh"
-    wrapper_url = "https://raw.githubusercontent.com/fbarreir/adc/master/runpilot3-wrapper.sh"
+    wrapper_url = "https://raw.githubusercontent.com/ptrlv/adc/master/runpilot3-wrapper.sh"
     wrapper_string = get_url(wrapper_url)
     with open(wrapper_path, "w") as wrapper_file:
         wrapper_file.write(wrapper_string)
-    os.chmod(wrapper_path, 0544) # make pilot wrapper executable
+    os.chmod(wrapper_path, 0o544) # make pilot wrapper executable
     logging.debug('[main] downloaded pilot wrapper')
 
     # execute the pilot wrapper
     logging.debug('[main] starting pilot wrapper...')
-    wrapper_params = '-s {0} -h {0}'.format(panda_queue)
+    wrapper_params = '-s {0} -h {1} -R {2}'.format(panda_site, panda_queue, resource_type)
     if 'ANALY' in panda_queue:
         wrapper_params = '{0} -u user'.format(wrapper_params)
+    else:
+        wrapper_params = '{0} -u managed'.format(wrapper_params)
     command = "/tmp/runpilot3-wrapper.sh {0} -p 25443 -w https://pandaserver.cern.ch >& /tmp/wrapper-wid.log".\
         format(wrapper_params, worker_id)
     subprocess.call(command, shell=True)
@@ -173,6 +182,6 @@ if __name__ == "__main__":
     upload_logs(logs_frontend_w, '/tmp/wrapper-wid.log', destination_name, proxy_path)
 
     # ask harvester to kill the VM and stop the heartbeat
-#    suicide(harvester_frontend, worker_id, auth_token, proxy_path)
+    # suicide(harvester_frontend, worker_id, auth_token, proxy_path)
     loop = False
-#    heartbeat_thread.join()
+    # heartbeat_thread.join()
