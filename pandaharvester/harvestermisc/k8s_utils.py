@@ -4,6 +4,8 @@ utilities routines associated with Kubernetes python client
 """
 import os
 import copy
+import datetime
+
 import six
 import yaml
 
@@ -75,7 +77,7 @@ class k8s_Client(six.with_metaclass(SingletonWithID, object)):
         rsp = self.batchv1.create_namespaced_job(body=yaml_content, namespace=self.namespace)
         return rsp
 
-    def get_pods_info(self, job_name=None):
+    def get_pods_info(self):
         pods_list = list()
 
         ret = self.corev1.list_namespaced_pod(namespace=self.namespace)
@@ -83,15 +85,18 @@ class k8s_Client(six.with_metaclass(SingletonWithID, object)):
         for i in ret.items:
             pod_info = {}
             pod_info['name'] = i.metadata.name
+            pod_info['start_time'] = i.status.start_time.replace(tzinfo=None) if i.status.start_time else i.status.start_time
             pod_info['status'] = i.status.phase
             pod_info['status_reason'] = i.status.conditions[0].reason if i.status.conditions else None
             pod_info['status_message'] = i.status.conditions[0].message if i.status.conditions else None
             pod_info['job_name'] = i.metadata.labels['job-name'] if i.metadata.labels and 'job-name' in i.metadata.labels else None
             pods_list.append(pod_info)
+
+        return pods_list
+
+    def filter_pods_info(self, pods_list, job_name=None):
         if job_name:
-            tmp_list = [ i for i in pods_list if i['job_name'] == job_name]
-            del pods_list[:]
-            pods_list = tmp_list
+            pods_list = [ i for i in pods_list if i['job_name'] == job_name]
         return pods_list
 
     def get_jobs_info(self, job_name=None):
@@ -109,7 +114,7 @@ class k8s_Client(six.with_metaclass(SingletonWithID, object)):
             jobs_list.append(job_info)
         return jobs_list
 
-    def delete_pod(self, pod_name_list):
+    def delete_pods(self, pod_name_list):
         retList = list()
 
         for pod_name in pod_name_list:

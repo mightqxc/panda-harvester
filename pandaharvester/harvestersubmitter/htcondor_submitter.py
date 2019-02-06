@@ -190,6 +190,17 @@ def _get_resource_type(string, is_unified_queue, is_pilot_option=False):
     return ret
 
 
+# Map pilotType to prodSourceLabel
+def _get_prod_source_label(pilot_type):
+    pt_psl_map = {
+        'RC': 'rc_test',
+        'ALRB': 'rc_alrb',
+        'PT': 'ptest',
+    }
+    prod_source_label = pt_psl_map.get(pilot_type, None)
+    return prod_source_label
+
+
 # submit a worker
 def submit_a_worker(data):
     workspec = data['workspec']
@@ -333,6 +344,11 @@ def make_batch_script(workspec, template, n_core_per_node, log_dir, panda_queue_
     request_walltime_minute = _div_round_up(request_walltime, 60)
     request_cputime_minute = _div_round_up(request_cputime, 60)
 
+    # decide prodSourceLabel
+    prod_source_label = _get_prod_source_label(workspec.pilotType)
+    if prod_source_label is None:
+        prod_source_label = harvester_queue_config.get_source_label()
+
     # fill in template
     tmpFile.write(template.format(
         sdfPath=tmpFile.name,
@@ -362,7 +378,7 @@ def make_batch_script(workspec, template, n_core_per_node, log_dir, panda_queue_
         logDir=log_dir,
         logSubdir=log_subdir,
         gtag=batch_log_dict.get('gtag', 'fake_GTAG_string'),
-        prodSourceLabel=harvester_queue_config.get_source_label(),
+        prodSourceLabel=prod_source_label,
         resourceType=_get_resource_type(workspec.resourceType, is_unified_queue),
         pilotResourceTypeOption=_get_resource_type(workspec.resourceType, is_unified_queue, True),
         ioIntensity=io_intensity,
@@ -611,6 +627,7 @@ class HTCondorSubmitter(PluginBase):
                 except AttributeError:
                     tmpLog.error('No valid templateFile found. Maybe templateFile, CEtemplateDir invalid, or no valid CE found')
                     to_submit = False
+                    return data
                 else:
                     # get batch_log, stdout, stderr filename, and remobe commented liness
                     sdf_template_str_list = []
@@ -631,47 +648,47 @@ class HTCondorSubmitter(PluginBase):
                             stderr_value = _match_stderr.group(1)
                             continue
                     sdf_template = '\n'.join(sdf_template_str_list)
-                # Choose from Condor schedd and central managers
-                if isinstance(self.condorSchedd, list) and len(self.condorSchedd) > 0:
-                    if isinstance(self.condorPool, list) and len(self.condorPool) > 0:
-                        condor_schedd, condor_pool = random.choice(list(zip(self.condorSchedd, self.condorPool)))
+                    # Choose from Condor schedd and central managers
+                    if isinstance(self.condorSchedd, list) and len(self.condorSchedd) > 0:
+                        if isinstance(self.condorPool, list) and len(self.condorPool) > 0:
+                            condor_schedd, condor_pool = random.choice(list(zip(self.condorSchedd, self.condorPool)))
+                        else:
+                            condor_schedd = random.choice(self.condorSchedd)
+                            condor_pool = self.condorPool
                     else:
-                        condor_schedd = random.choice(self.condorSchedd)
+                        condor_schedd = self.condorSchedd
                         condor_pool = self.condorPool
-                else:
-                    condor_schedd = self.condorSchedd
-                    condor_pool = self.condorPool
-                # Log Base URL
-                if self.logBaseURL and '[ScheddHostname]' in self.logBaseURL:
-                    schedd_hostname = re.sub(r'(?:[a-zA-Z0-9_.\-]*@)?([a-zA-Z0-9.\-]+)(?::[0-9]+)?',
-                                                lambda matchobj: matchobj.group(1) if matchobj.group(1) else '',
-                                                condor_schedd)
-                    log_base_url = re.sub(r'\[ScheddHostname\]', schedd_hostname, self.logBaseURL)
-                else:
-                    log_base_url = self.logBaseURL
-                # URLs for log files
-                if not (log_base_url is None):
-                    if workspec.batchID:
-                        batchID = workspec.batchID
-                        guess = False
+                    # Log Base URL
+                    if self.logBaseURL and '[ScheddHostname]' in self.logBaseURL:
+                        schedd_hostname = re.sub(r'(?:[a-zA-Z0-9_.\-]*@)?([a-zA-Z0-9.\-]+)(?::[0-9]+)?',
+                                                    lambda matchobj: matchobj.group(1) if matchobj.group(1) else '',
+                                                    condor_schedd)
+                        log_base_url = re.sub(r'\[ScheddHostname\]', schedd_hostname, self.logBaseURL)
                     else:
-                        batchID = ''
-                        guess = True
-                    batch_log_filename = parse_batch_job_filename(value_str=batch_log_value, file_dir=log_subdir_path, batchID=batchID, guess=guess)
-                    stdout_path_file_name = parse_batch_job_filename(value_str=stdout_value, file_dir=log_subdir_path, batchID=batchID, guess=guess)
-                    stderr_path_filename = parse_batch_job_filename(value_str=stderr_value, file_dir=log_subdir_path, batchID=batchID, guess=guess)
-                    batch_log = '{0}/{1}/{2}'.format(log_base_url, log_subdir, batch_log_filename)
-                    batch_stdout = '{0}/{1}/{2}'.format(log_base_url, log_subdir, stdout_path_file_name)
-                    batch_stderr = '{0}/{1}/{2}'.format(log_base_url, log_subdir, stderr_path_filename)
-                    workspec.set_log_file('batch_log', batch_log)
-                    workspec.set_log_file('stdout', batch_stdout)
-                    workspec.set_log_file('stderr', batch_stderr)
-                    batch_log_dict['batch_log'] = batch_log
-                    batch_log_dict['batch_stdout'] = batch_stdout
-                    batch_log_dict['batch_stderr'] = batch_stderr
-                    batch_log_dict['gtag'] = workspec.workAttributes['stdOut']
-                    tmpLog.debug('Done set_log_file before submission')
-                tmpLog.debug('Done jobspec attribute setting')
+                        log_base_url = self.logBaseURL
+                    # URLs for log files
+                    if not (log_base_url is None):
+                        if workspec.batchID:
+                            batchID = workspec.batchID
+                            guess = False
+                        else:
+                            batchID = ''
+                            guess = True
+                        batch_log_filename = parse_batch_job_filename(value_str=batch_log_value, file_dir=log_subdir_path, batchID=batchID, guess=guess)
+                        stdout_path_file_name = parse_batch_job_filename(value_str=stdout_value, file_dir=log_subdir_path, batchID=batchID, guess=guess)
+                        stderr_path_filename = parse_batch_job_filename(value_str=stderr_value, file_dir=log_subdir_path, batchID=batchID, guess=guess)
+                        batch_log = '{0}/{1}/{2}'.format(log_base_url, log_subdir, batch_log_filename)
+                        batch_stdout = '{0}/{1}/{2}'.format(log_base_url, log_subdir, stdout_path_file_name)
+                        batch_stderr = '{0}/{1}/{2}'.format(log_base_url, log_subdir, stderr_path_filename)
+                        workspec.set_log_file('batch_log', batch_log)
+                        workspec.set_log_file('stdout', batch_stdout)
+                        workspec.set_log_file('stderr', batch_stderr)
+                        batch_log_dict['batch_log'] = batch_log
+                        batch_log_dict['batch_stdout'] = batch_stdout
+                        batch_log_dict['batch_stderr'] = batch_stderr
+                        batch_log_dict['gtag'] = workspec.workAttributes['stdOut']
+                        tmpLog.debug('Done set_log_file before submission')
+                    tmpLog.debug('Done jobspec attribute setting')
                 # set data dict
                 data.update({
                         'workspec': workspec,
