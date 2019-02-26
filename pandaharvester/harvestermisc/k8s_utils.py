@@ -5,6 +5,7 @@ utilities routines associated with Kubernetes python client
 import os
 import copy
 import datetime
+import base64
 
 import six
 import yaml
@@ -32,7 +33,7 @@ class k8s_Client(six.with_metaclass(SingletonWithID, object)):
 
         return yaml_content
 
-    def create_job_from_yaml(self, yaml_content, work_spec, cert, cpuadjustratio, memoryadjustratio):
+    def create_job_from_yaml(self, yaml_content, work_spec, cert, cert_in_secret=True, cpuadjustratio=100, memoryadjustratio=100):
         panda_queues_dict = PandaQueuesDict()
         queue_name = panda_queues_dict.get_panda_queue_name(work_spec.computingSite)
 
@@ -50,13 +51,18 @@ class k8s_Client(six.with_metaclass(SingletonWithID, object)):
         container_env.setdefault('resources', {})
 
         # note that predefined values in the yaml template will NOT be overwritten
-        container_env['resources'].setdefault('limits', {
-            'memory': str(work_spec.minRamCount) + 'M',
-            'cpu': str(work_spec.nCore)})
+        if work_spec.nCore > 0:
+            container_env['resources'].setdefault('limits', {
+                'cpu': str(work_spec.nCore)})
+            container_env['resources'].setdefault('requests', {
+                'cpu': str(work_spec.nCore*cpuadjustratio/100.0)})
 
-        container_env['resources'].setdefault('requests', {
-            'memory': str(work_spec.minRamCount*memoryadjustratio/100.0) + 'M',
-            'cpu': str(work_spec.nCore*cpuadjustratio/100.0)})
+        if work_spec.minRamCount > 4:
+            # K8S minimum memory limit = 4 MB
+            container_env['resources'].setdefault('limits', {
+                'memory': str(work_spec.minRamCount) + 'M'})
+            container_env['resources'].setdefault('requests', {
+                'memory': str(work_spec.minRamCount*memoryadjustratio/100.0) + 'M'})
 
         container_env.setdefault('env', [])
 
@@ -64,7 +70,8 @@ class k8s_Client(six.with_metaclass(SingletonWithID, object)):
             {'name': 'computingSite', 'value': work_spec.computingSite},
             {'name': 'pandaQueueName', 'value': queue_name},
             {'name': 'resourceType', 'value': work_spec.resourceType},
-            {'name': 'proxyContent', 'value': self.set_proxy(cert)},
+            {'name': 'proxySecretPath', 'value': cert if cert_in_secret else None},
+            {'name': 'proxyContent', 'value': None if cert_in_secret else self.set_proxy(cert)},
             {'name': 'workerID', 'value': str(work_spec.workerID)},
             {'name': 'logs_frontend_w', 'value': harvester_config.pandacon.pandaCacheURL_W},
             {'name': 'logs_frontend_r', 'value': harvester_config.pandacon.pandaCacheURL_R},
@@ -161,3 +168,22 @@ class k8s_Client(six.with_metaclass(SingletonWithID, object)):
         yaml_affinity['podAntiAffinity']['preferredDuringSchedulingIgnoredDuringExecution'][0]['podAffinityTerm']['labelSelector']['matchExpressions'][0]['values'][0] = res_element.difference({resourceType}).pop()
 
         return yaml_content
+
+    def create_or_patch_secret(self, file_list, secret_name):
+        # api_version = 'v1'
+        # kind = 'Secret'
+        # type='kubernetes.io/tls'
+        metadata = {'name': secret_name, 'namespace': self.namespace}
+        data = {}
+        for file in file_list:
+            filename = os.path.basename(file)
+            with open(file, 'rb') as f:
+                str = f.read()
+            data[filename] = base64.b64encode(str).decode()
+        body = client.V1Secret(data=data, metadata=metadata)
+        try:
+            rsp = self.corev1.patch_namespaced_secret(name=secret_name, body=body, namespace=self.namespace)
+        except ApiException as e:
+            print('Exception when patch secret: {0} . Try to create secret instead...'.format(e))
+            rsp = self.corev1.create_namespaced_secret(body=body, namespace=self.namespace)
+        return rsp
